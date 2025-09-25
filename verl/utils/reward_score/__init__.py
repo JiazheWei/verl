@@ -24,6 +24,7 @@ def default_compute_score(
     sandbox_fusion_url=None,
     concurrent_semaphore=None,
     memory_limit_mb=None,
+    **kwargs,
 ):
     """Compute the score for a given solution based on the data source.
 
@@ -101,7 +102,16 @@ def default_compute_score(
         from . import search_r1_like_qa_em
 
         res = search_r1_like_qa_em.compute_score(solution_str, ground_truth)
+    elif data_source == "poster_layout_synthetic":
+        from . import visual_quality_poster_reward
 
+        res = visual_quality_poster_reward.compute_score(
+            data_source=data_source,
+            solution_str=solution_str,
+            ground_truth=ground_truth,
+            extra_info=extra_info,
+            **kwargs  # 传递额外的关键字参数，如权重配置等
+        )
     else:
         raise NotImplementedError(f"Reward function is not implemented for {data_source=}")
 

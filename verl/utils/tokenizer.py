@@ -72,10 +72,12 @@ def hf_processor(name_or_path, **kwargs):
     Returns:
         transformers.ProcessorMixin: The pretrained processor.
     """
+    print("###################################################################")
     from transformers import AutoProcessor
-
+    min_pixels = 20 * 28 * 28 # ~ 125x125
+    max_pixels = 72 * 28 * 28 # ～ 125 x 125
     try:
-        processor = AutoProcessor.from_pretrained(name_or_path, **kwargs)
+        processor = AutoProcessor.from_pretrained(name_or_path, **kwargs, min_pixels=min_pixels, max_pixels=max_pixels)
     except Exception as e:
         processor = None
         # TODO(haibin.lin): try-catch should be removed after adding transformer version req to setup.py to avoid

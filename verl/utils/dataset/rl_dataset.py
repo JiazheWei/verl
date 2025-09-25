@@ -201,23 +201,74 @@ class RLHFDataset(Dataset):
         return len(self.dataframe)
 
     def _build_messages(self, example: dict):
+        import numpy as np
+        
         messages: list = example.pop(self.prompt_key)
+        
+        # 添加numpy数组转换支持
+        def convert_numpy_to_native(data):
+            """递归转换numpy数组为Python原生类型"""
+            if isinstance(data, np.ndarray):
+                return [convert_numpy_to_native(item) for item in data.tolist()]
+            elif isinstance(data, dict):
+                return {k: convert_numpy_to_native(v) for k, v in data.items()}
+            elif isinstance(data, list):
+                return [convert_numpy_to_native(item) for item in data]
+            else:
+                return data
+        
+        # 转换numpy数组为原生Python格式
+        messages = convert_numpy_to_native(messages)
 
         if self.image_key in example or self.video_key in example:
             for message in messages:
                 content = message["content"]
-                content_list = []
-                segments = re.split("(<image>|<video>)", content)
-                segments = [item for item in segments if item != ""]
-                for segment in segments:
-                    if segment == "<image>":
-                        content_list.append({"type": "image"})
-                    elif segment == "<video>":
-                        content_list.append({"type": "video"})
+                
+                # 检查content是否已经是结构化格式
+                if isinstance(content, list) and all(isinstance(item, dict) and "type" in item for item in content):
+                    # content已经是结构化格式，只需要转换numpy并验证格式
+                    converted_content = convert_numpy_to_native(content)
+                    
+                    # 过滤并重新排序content：确保text和image/video类型正确分离
+                    filtered_content = []
+                    for item in converted_content:
+                        if isinstance(item, dict) and "type" in item:
+                            if item["type"] == "image":
+                                # 确保image项目有正确的结构，只包含type字段
+                                filtered_content.append({"type": "image"})
+                            elif item["type"] == "video":
+                                # 确保video项目有正确的结构，只包含type字段  
+                                filtered_content.append({"type": "video"})
+                            elif item["type"] == "text" and item.get("text"):
+                                # 保留text项目，只包含type和text字段，移除其他可能干扰的字段如"image": null
+                                filtered_content.append({"type": "text", "text": item["text"]})
+                    
+                    # 如果没有image或video类型的内容，将整个content转换为纯文本
+                    has_media = any(item.get("type") in ["image", "video"] for item in filtered_content)
+                    if not has_media:
+                        # 提取所有text内容合并
+                        text_parts = [item.get("text", "") for item in filtered_content if item.get("type") == "text"]
+                        combined_text = "".join(text_parts)
+                        message["content"] = combined_text
                     else:
-                        content_list.append({"type": "text", "text": segment})
-
-                message["content"] = content_list
+                        message["content"] = filtered_content
+                        
+                elif isinstance(content, str):
+                    # content是字符串，需要拆分<image>标记
+                    content_list = []
+                    segments = re.split("(<image>|<video>)", content)
+                    segments = [item for item in segments if item != ""]
+                    for segment in segments:
+                        if segment == "<image>":
+                            content_list.append({"type": "image"})
+                        elif segment == "<video>":
+                            content_list.append({"type": "video"})
+                        else:
+                            content_list.append({"type": "text", "text": segment})
+                    message["content"] = content_list
+                else:
+                    # 处理其他格式（numpy数组等）
+                    message["content"] = convert_numpy_to_native(content)
 
         return messages
 
@@ -240,6 +291,11 @@ class RLHFDataset(Dataset):
             images = None
             row_dict_images = row_dict.pop(self.image_key, None)
             if row_dict_images:
+                # 添加numpy数组转换支持
+                import numpy as np
+                if isinstance(row_dict_images, np.ndarray):
+                    row_dict_images = row_dict_images.tolist()
+                    
                 images = [process_image(image) for image in row_dict_images]
 
                 # due to the image key is "image" instead of "images" in vllm, we need to use "image" here
@@ -249,13 +305,81 @@ class RLHFDataset(Dataset):
             videos = None
             row_dict_videos = row_dict.pop(self.video_key, None)
             if row_dict_videos:
+                # 添加numpy数组转换支持
+                if isinstance(row_dict_videos, np.ndarray):
+                    row_dict_videos = row_dict_videos.tolist()
                 videos = [process_video(video) for video in row_dict_videos]
 
                 # due to the video key is "video" instead of "videos" in vllm, we need to use "video" here
                 # link: https://github.com/vllm-project/vllm/blob/3c545c0c3b98ee642373a308197d750d0e449403/vllm/multimodal/parse.py#L205
                 multi_modal_data["video"] = [video.numpy() for video in videos]
 
-            model_inputs = self.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
+            try:
+                model_inputs = self.processor(text=[raw_prompt], images=images, videos=videos, return_tensors="pt")
+            except Exception as e:
+                print(f"\n🚨 PROCESSOR ERROR at sample index {item} 🚨")
+                print(f"Error type: {type(e).__name__}")
+                print(f"Error message: {str(e)}")
+                print(f"\n=== SAMPLE DEBUG INFO ===")
+                print(f"Dataset index: {item}")
+                print(f"Images count: {len(images) if images else 0}")
+                print(f"Videos count: {len(videos) if videos else 0}")
+                print(f"Raw prompt length: {len(raw_prompt)}")
+                print(f"Raw prompt preview: {raw_prompt[:300]}...")
+                
+                print(f"\n=== MESSAGES DEBUG ===")
+                for i, msg in enumerate(messages):
+                    print(f"Message {i} ({msg.get('role', 'unknown')}):")
+                    content = msg.get('content', [])
+                    if isinstance(content, list):
+                        image_count = sum(1 for item in content if isinstance(item, dict) and item.get('type') == 'image')
+                        text_count = sum(1 for item in content if isinstance(item, dict) and item.get('type') == 'text')
+                        print(f"  Content items: {len(content)} (images: {image_count}, text: {text_count})")
+                    else:
+                        print(f"  Content type: {type(content)}")
+                
+                print(f"\n=== IMAGES DETAIL ===")
+                if images:
+                    for i, img in enumerate(images[:3]):  # 只显示前3个
+                        print(f"Image {i}: type={type(img)}, size={img.size if hasattr(img, 'size') else 'N/A'}")
+                
+                print(f"\n=== RAW DATA DEBUG ===")
+                original_row = self.dataframe[item]
+                print(f"Original row keys: {list(original_row.keys())}")
+                if 'extra_info' in original_row:
+                    extra_info = original_row['extra_info']
+                    if isinstance(extra_info, dict):
+                        print(f"Sample ID: {extra_info.get('sample_id', 'unknown')}")
+                        print(f"Canvas size: {extra_info.get('width', 'unknown')}x{extra_info.get('height', 'unknown')}")
+                        print(f"Total layers: {extra_info.get('total_layers', 'unknown')}")
+                
+                # 保存完整的raw_prompt到错误文件
+                try:
+                    error_file_path = "/opt/liblibai-models/user-workspace/jiazhewei/error.txt"
+                    with open(error_file_path, "w", encoding="utf-8") as f:
+                        f.write("=== PROCESSOR ERROR SAMPLE ===\n")
+                        f.write(f"Error type: {type(e).__name__}\n")
+                        f.write(f"Error message: {str(e)}\n")
+                        f.write(f"Dataset index: {item}\n")
+                        f.write(f"Images count: {len(images) if images else 0}\n")
+                        f.write(f"Videos count: {len(videos) if videos else 0}\n")
+                        f.write(f"Raw prompt length: {len(raw_prompt)}\n")
+                        f.write("=" * 50 + "\n")
+                        f.write("COMPLETE RAW PROMPT:\n")
+                        f.write("=" * 50 + "\n")
+                        f.write(raw_prompt)
+                        f.write("\n" + "=" * 50 + "\n")
+                        f.write("MESSAGES STRUCTURE:\n")
+                        f.write("=" * 50 + "\n")
+                        import json
+                        f.write(json.dumps(messages, indent=2, ensure_ascii=False))
+                        f.write("\n" + "=" * 50 + "\n")
+                    print(f"\n✅ 完整的raw_prompt已保存到: {error_file_path}")
+                except Exception as save_error:
+                    print(f"\n❌ 保存错误文件失败: {save_error}")
+                
+                print("=" * 60)
+                raise e  # 重新抛出异常
 
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")
