@@ -46,7 +46,7 @@ def preprocess_poster_layout_rl_data():
         如果图像数量超过阈值，返回None进行过滤
         """
         # 首先检查图像数量，提前过滤
-        MAX_IMAGES = 8  # Qwen2.5-VL处理器限制
+        MAX_IMAGES = 15  # Qwen2.5-VL处理器限制
         images_array = row['images'] if isinstance(row['images'], list) else row['images'].tolist()
         
         if len(images_array) > MAX_IMAGES:
@@ -150,7 +150,7 @@ def preprocess_poster_layout_rl_data():
     print(f"数据预处理完成！")
     print(f"训练集: {len(train_df)} -> {len(train_data)} 样本 (过滤掉 {filtered_train_count} 个)")
     print(f"测试集: {len(test_df)} -> {len(test_data)} 样本 (过滤掉 {filtered_test_count} 个)")
-    print(f"过滤原因: 图像数量 > 8")
+    print(f"过滤原因: 图像数量 > 15")
     print(f"输出目录: {args.output_dir}")
     
     # 打印一个样本示例用于验证

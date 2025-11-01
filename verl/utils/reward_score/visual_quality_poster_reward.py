@@ -25,13 +25,9 @@ import tempfile
 from typing import Dict, Any, List, Optional
 from difflib import SequenceMatcher
 import difflib
-
-import torch
+import requests
+import time
 from PIL import Image
-from transformers import Qwen2_5_VLForConditionalGeneration, AutoProcessor
-from qwen_vl_utils import process_vision_info
-import deepdiff
-
 # 全局变量存储加载的模型和数据
 _VISUAL_QUALITY_MODEL = None
 _VISUAL_QUALITY_PROCESSOR = None
@@ -361,10 +357,11 @@ def compute_score(
     accuracy_weight: float = 0.4,
     visual_weight: float = 0.2,
     visual_quality_gpu_id: int = 7,
-    jsonl_file_path: str = "/opt/liblibai-models/user-workspace/jiazhewei/typo_master/psd_dataset_169000_merged_with_caption.jsonl"
+    jsonl_file_path: str = "/opt/liblibai-models/user-workspace/jiazhewei/typo_master/psd_dataset_169000_merged_with_caption.jsonl",
+    reward_server_url: str = "http://localhost:8899"
 ) -> Dict[str, Any]:
     """
-    海报布局生成任务的奖励函数
+    海报布局生成任务的奖励函数 - 通过HTTP服务调用
     
     Args:
         data_source: 数据源标识（应为"poster_layout_synthetic"）
@@ -374,85 +371,54 @@ def compute_score(
         structure_weight: 结构匹配权重
         accuracy_weight: 文本准确度权重  
         visual_weight: 视觉质量权重
-        visual_quality_gpu_id: VisualQuality-R1模型使用的GPU ID
+        visual_quality_gpu_id: VisualQuality-R1模型使用的GPU ID（用于兼容性）
         jsonl_file_path: JSONL查找表文件路径
+        reward_server_url: Reward模型服务的URL
         
     Returns:
         包含分数和详细信息的字典
     """
     try:
-        # 加载必要的资源
-        visual_model, visual_processor = _load_visual_quality_model(visual_quality_gpu_id)
-        lookup_table = _load_jsonl_lookup_table(jsonl_file_path)
-        
-        sample_id = extra_info.get('sample_id', '')
-        
-        # 1. 提取和解析JSON
-        json_str = _extract_json_from_response(solution_str)
-        try:
-            parsed_json = json.loads(json_str)
-        except json.JSONDecodeError as e:
-            print(f"JSON parsing failed: {e}")
-            return {
-                "score": 1.0,  # 最低正分
-                "visual_score": 1.0,
-                "accuracy_score": 0.0,
-                "structure_score": 0.0,
-                "error": "JSON parsing failed"
-            }
-        
-        # 2. 注入image_id路径映射
-        parsed_json = _inject_image_paths(parsed_json, sample_id, lookup_table)
-        
-        # 3. 渲染为图片
-        with tempfile.TemporaryDirectory() as temp_dir:
-            rendered_image = _render_json_to_image(parsed_json, temp_dir)
-            
-            if rendered_image is None:
-                print("Image rendering failed")
-                return {
-                    "score": 1.0,  # 最低正分
-                    "visual_score": 1.0,
-                    "accuracy_score": 0.0,
-                    "structure_score": 0.0,
-                    "error": "Image rendering failed"
-                }
-            
-            # 4. 计算视觉质量分数
-            visual_score = _score_visual_quality(rendered_image, visual_model, visual_processor)
-        
-        # 5. 计算文本准确度分数
-        ground_truth_str = json.dumps(ground_truth, ensure_ascii=False)
-        accuracy_score = _calculate_text_similarity(json_str, ground_truth_str)
-        
-        # 6. 计算结构相似度分数
-        structure_score = _calculate_structure_similarity(parsed_json, ground_truth)
-        
-        # 7. 加权计算最终分数
-        final_score = (
-            visual_weight * visual_score +
-            accuracy_weight * accuracy_score * 5 +  # 将0-1范围转换为1-5范围
-            structure_weight * structure_score * 5
-        )
-        
-        return {
-            "score": final_score,
-            "visual_score": visual_score,
-            "accuracy_score": accuracy_score,
-            "structure_score": structure_score,
-            "weights": {
-                "visual_weight": visual_weight,
-                "accuracy_weight": accuracy_weight,
-                "structure_weight": structure_weight
-            }
+        # 准备请求数据
+        request_data = {
+            "solution_str": solution_str,
+            "ground_truth": ground_truth,
+            "extra_info": extra_info,
+            "structure_weight": structure_weight,
+            "accuracy_weight": accuracy_weight,
+            "visual_weight": visual_weight,
+            "jsonl_file_path": jsonl_file_path
         }
+        
+        # 调用reward模型服务
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                response = requests.post(
+                    f"{reward_server_url}/compute_reward",
+                    json=request_data,
+                    timeout=30  # 30秒超时
+                )
+                
+                if response.status_code == 200:
+                    result = response.json()
+                    # 服务端现在只返回最终分数，符合VERL框架期望
+                    return result["score"]
+                else:
+                    print(f"Reward server returned status {response.status_code}: {response.text}")
+                    
+            except requests.exceptions.RequestException as e:
+                print(f"Request failed (attempt {attempt + 1}/{max_retries}): {e}")
+                if attempt < max_retries - 1:
+                    time.sleep(1)  # 重试前等待1秒
+                    continue
+                else:
+                    raise e
+        
+        # 如果所有重试都失败，返回默认值
+        print("All reward server requests failed, returning default score")
+        return 2.5  # 默认中等分数，符合VERL框架期望
         
     except Exception as e:
         print(f"Error in compute_score: {e}")
-        return {
-            "score": 1.0,  # 最低正分
-            "visual_score": 1.0,
-            "accuracy_score": 0.0,
-            "structure_score": 0.0,
-            "error": str(e)
-        }
+        return 1.0  # 最低正分，符合VERL框架期望

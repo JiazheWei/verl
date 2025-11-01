@@ -5,6 +5,11 @@ set -x
 # 充分利用8张H20显卡：7张训练 + 1张专门给reward model
 # 总显存：8 x 96GB = 768GB
 
+# SwanLab监控配置
+export SWANLAB_API_KEY=${SWANLAB_API_KEY:-"Z6PZIvJAcy6CiF5INwAZh"}  # 请设置您的SwanLab API Key
+export SWANLAB_LOG_DIR="swanlog/poster_layout_grpo"
+export SWANLAB_MODE="cloud"  # cloud模式，如果无网络可改为offline
+
 # 优化NCCL设置
 export NCCL_SHM_DISABLE=1
 export NCCL_P2P_DISABLE=0  # 启用P2P提高多GPU通信效率
@@ -12,8 +17,8 @@ export NCCL_NET_GDR_LEVEL=0
 export NCCL_DEBUG=INFO
 export NCCL_TREE_THRESHOLD=0  # 使用tree算法优化多GPU通信
 
-# 设置CUDA可见设备（0-6用于训练，7专门给reward model）
-export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
+# 设置CUDA可见设备（0-6用于训练，GPU 7留给独立的reward model服务）
+export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6
 
 ENGINE=${1:-vllm}
 
@@ -29,7 +34,7 @@ python3 -m verl.trainer.main_ppo \
     data.image_key=images \
     data.filter_overlong_prompts_workers=1 \
     data.dataloader_num_workers=2 \
-    actor_rollout_ref.model.path=/opt/liblibai-models/user-workspace/jiazhewei/checkpoints-secondepoch \
+    actor_rollout_ref.model.path=/opt/liblibai-models/user-workspace/jiazhewei/qwen-with-caption-second-epoch/checkpoint-1000 \
     actor_rollout_ref.model.tokenizer_path=/opt/liblibai-models/model-weights/Qwen/Qwen2.5-VL-7B-Instruct \
     actor_rollout_ref.actor.optim.lr=5e-7 \
     actor_rollout_ref.model.use_remove_padding=True \
@@ -50,8 +55,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.75 \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
     actor_rollout_ref.rollout.max_num_seqs=32 \
-    actor_rollout_ref.rollout.max_model_len=32768 \
-    actor_rollout_ref.rollout.max_num_batched_tokens=65536 \
+    actor_rollout_ref.rollout.max_model_len=128000 \
+    actor_rollout_ref.rollout.max_num_batched_tokens=128000 \
     actor_rollout_ref.rollout.enforce_eager=False \
     actor_rollout_ref.rollout.free_cache_engine=True \
     actor_rollout_ref.rollout.n=4 \
@@ -59,7 +64,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     algorithm.use_kl_in_reward=False \
     trainer.critic_warmup=0 \
-    trainer.logger='["console"]' \
+    trainer.logger='["console","swanlab"]' \
     trainer.project_name='poster_layout_grpo' \
     trainer.experiment_name='qwen2_5_vl_7b_poster_8h20_optimized' \
     trainer.n_gpus_per_node=7 \
@@ -67,6 +72,8 @@ python3 -m verl.trainer.main_ppo \
     trainer.save_freq=50 \
     trainer.test_freq=10 \
     trainer.total_epochs=100 \
+    #trainer.resume_mode=disable \
+    +trainer.checkpoint.save_contents='["model","optimizer","extra","hf_model"]' \
     reward_model.enable=False \
     custom_reward_function.path=verl/utils/reward_score/visual_quality_poster_reward.py \
     custom_reward_function.name=compute_score $@
